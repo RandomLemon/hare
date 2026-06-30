@@ -5,7 +5,8 @@ use anyhow::Result;
 ///
 /// Variants carry both the data and a hint about how to format/interpret it.
 /// `Series` is used for per-core (or otherwise indexed) readings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // variants are part of the extensible domain model, used as new metrics land
 pub enum Value {
     Freq(f64),
     Temp(f64),
@@ -17,8 +18,53 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn nan_freq() -> Self {
-        Self::Freq(f64::NAN)
+    /// Human-readable rendering of a single value (no surrounding context).
+    pub fn format(&self) -> String {
+        match self {
+            Value::Freq(v) => {
+                if v.is_nan() {
+                    "NaN".to_string()
+                } else {
+                    format!("{:.2} MHz", v)
+                }
+            }
+            Value::Temp(v) => {
+                if v.is_nan() {
+                    "NaN".to_string()
+                } else {
+                    format!("{:.1} C", v)
+                }
+            }
+            Value::Percent(v) => format!("{:.1}%", v),
+            Value::Bool(b) => {
+                if *b {
+                    "online".to_string()
+                } else {
+                    "offline".to_string()
+                }
+            }
+            Value::Enum(s) => s.clone(),
+            Value::Raw(s) => s.trim().to_string(),
+            Value::Series(vs) => {
+                let parts: Vec<String> = vs.iter().map(|v| v.format()).collect();
+                format!("[{}]", parts.join(", "))
+            }
+        }
+    }
+
+    /// Expand a (possibly per-core) value into display lines.
+    ///
+    /// Scalars yield a single line; `Series` yields one line per element
+    /// prefixed with its index.
+    pub fn lines(&self) -> Vec<String> {
+        match self {
+            Value::Series(vs) => vs
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("#{}: {}", i, v.format()))
+                .collect(),
+            other => vec![other.format()],
+        }
     }
 }
 
@@ -41,6 +87,7 @@ pub trait Metric: Send + Sync {
     }
 
     /// Coarse grouping used to organise CLI/TUI views, e.g. `"cpu"`.
+    #[allow(dead_code)] // consumed once multi-category metrics and TUI tabs land
     fn category(&self) -> &str {
         "cpu"
     }

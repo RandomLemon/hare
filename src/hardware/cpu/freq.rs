@@ -6,9 +6,6 @@ use std::path::{Path, PathBuf};
 const SYS_CPU: &str = "/sys/devices/system/cpu";
 
 /// Metric: current frequency of every CPU core (MHz).
-///
-/// Reads `scaling_cur_freq` for each `cpuN`. Missing/unreadable cores produce
-/// `Value::Freq(NaN)` so that indexing stays stable across cores.
 pub struct CpuCurrentFreqMetric;
 
 impl CpuCurrentFreqMetric {
@@ -37,22 +34,80 @@ impl Metric for CpuCurrentFreqMetric {
     }
 
     fn read(&self, source: &dyn Source) -> Result<Value> {
-        let frequencies = current_frequencies_mhz_with(source)?;
         Ok(Value::Series(
-            frequencies.into_iter().map(Value::Freq).collect(),
+            per_core_mhz(source, "cpufreq/scaling_cur_freq")?
+                .into_iter()
+                .map(Value::Freq)
+                .collect(),
         ))
     }
 }
 
-/// Reads the current frequency of every CPU core via the provided [`Source`].
-///
-/// Returns the frequencies in MHz ordered by CPU index. Cores whose frequency
-/// cannot be read yield `f64::NAN`.
-pub fn current_frequencies_mhz() -> Result<Vec<f64>> {
-    current_frequencies_mhz_with(&crate::hardware::source::SysfsSource::new())
+/// Metric: minimum scaling frequency of every CPU core (MHz).
+pub struct CpuMinFreqMetric;
+
+impl CpuMinFreqMetric {
+    pub fn new() -> Self {
+        Self
+    }
 }
 
-fn current_frequencies_mhz_with(source: &dyn Source) -> Result<Vec<f64>> {
+impl Metric for CpuMinFreqMetric {
+    fn id(&self) -> &str {
+        "cpu.freq.min"
+    }
+
+    fn label(&self) -> &str {
+        "Minimum Frequency"
+    }
+
+    fn unit(&self) -> &str {
+        "MHz"
+    }
+
+    fn read(&self, source: &dyn Source) -> Result<Value> {
+        Ok(Value::Series(
+            per_core_mhz(source, "cpufreq/scaling_min_freq")?
+                .into_iter()
+                .map(Value::Freq)
+                .collect(),
+        ))
+    }
+}
+
+/// Metric: maximum scaling frequency of every CPU core (MHz).
+pub struct CpuMaxFreqMetric;
+
+impl CpuMaxFreqMetric {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Metric for CpuMaxFreqMetric {
+    fn id(&self) -> &str {
+        "cpu.freq.max"
+    }
+
+    fn label(&self) -> &str {
+        "Maximum Frequency"
+    }
+
+    fn unit(&self) -> &str {
+        "MHz"
+    }
+
+    fn read(&self, source: &dyn Source) -> Result<Value> {
+        Ok(Value::Series(
+            per_core_mhz(source, "cpufreq/scaling_max_freq")?
+                .into_iter()
+                .map(Value::Freq)
+                .collect(),
+        ))
+    }
+}
+
+fn per_core_mhz(source: &dyn Source, rel: &str) -> Result<Vec<f64>> {
     let entries = source.list_dir(Path::new(SYS_CPU))?;
 
     let mut frequencies: Vec<(usize, f64)> = Vec::new();
@@ -68,7 +123,7 @@ fn current_frequencies_mhz_with(source: &dyn Source) -> Result<Vec<f64>> {
             continue;
         };
 
-        let freq_path: PathBuf = path.join("cpufreq/scaling_cur_freq");
+        let freq_path: PathBuf = path.join(rel);
         let mhz = read_freq_mhz(source, &freq_path).unwrap_or(f64::NAN);
         frequencies.push((index, mhz));
     }
@@ -92,7 +147,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    /// In-memory `Source` for exercising parsing logic without sysfs.
     struct FakeSource {
         files: HashMap<PathBuf, String>,
         dirs: HashMap<PathBuf, Vec<PathBuf>>,
@@ -137,19 +191,24 @@ mod tests {
         let mut files = HashMap::new();
         files.insert(cpu0.join("cpufreq/scaling_cur_freq"), "2400000\n".to_string());
         files.insert(cpu1.join("cpufreq/scaling_cur_freq"), "1800000\n".to_string());
-        // cpu3 has no scaling_cur_freq -> NaN
+        files.insert(cpu0.join("cpufreq/scaling_min_freq"), "800000\n".to_string());
+        files.insert(cpu1.join("cpufreq/scaling_min_freq"), "800000\n".to_string());
+        files.insert(cpu0.join("cpufreq/scaling_max_freq"), "3500000\n".to_string());
+        files.insert(cpu1.join("cpufreq/scaling_max_freq"), "3500000\n".to_string());
 
         FakeSource { files, dirs }
     }
 
     #[test]
-    fn reads_frequencies_in_index_order_with_nan_for_missing() {
+    fn reads_cur_frequencies_in_index_order_with_nan_for_missing() {
         let src = fake_source();
-        let freqs = current_frequencies_mhz_with(&src).unwrap();
-        assert_eq!(freqs.len(), 3);
-        assert_eq!(freqs[0], 2400.0);
-        assert_eq!(freqs[1], 1800.0);
-        assert!(freqs[2].is_nan());
+        let Value::Series(values) = CpuCurrentFreqMetric::new().read(&src).unwrap() else {
+            panic!("expected Series");
+        };
+        assert_eq!(values.len(), 3);
+        assert!(matches!(values[0], Value::Freq(v) if (v - 2400.0).abs() < 1e-6));
+        assert!(matches!(values[1], Value::Freq(v) if (v - 1800.0).abs() < 1e-6));
+        assert!(matches!(values[2], Value::Freq(v) if v.is_nan()));
     }
 
     #[test]
@@ -161,6 +220,17 @@ mod tests {
         };
         assert_eq!(values.len(), 3);
         assert!(matches!(values[2], Value::Freq(v) if v.is_nan()));
+    }
+
+    #[test]
+    fn min_max_metrics_read_expected_values() {
+        let src = fake_source();
+        let min = CpuMinFreqMetric::new().read(&src).unwrap();
+        let max = CpuMaxFreqMetric::new().read(&src).unwrap();
+        let Value::Series(mins) = min else { panic!("min series") };
+        let Value::Series(maxs) = max else { panic!("max series") };
+        assert_eq!(mins[0], Value::Freq(800.0));
+        assert_eq!(maxs[0], Value::Freq(3500.0));
     }
 
     #[test]

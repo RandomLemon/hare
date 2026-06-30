@@ -7,53 +7,53 @@ use ratatui::{
     Frame,
 };
 
-const CPU_COLUMN_WIDTH: usize = 8;
-const FREQ_COLUMN_WIDTH: usize = 15;
-
 pub fn draw(frame: &mut Frame, app: &App) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
-    draw_frequency_view(frame, app, main_layout[0]);
+    draw_metric_view(frame, app, main_layout[0]);
     draw_status_bar(frame, app, main_layout[1]);
 }
 
-fn draw_frequency_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_metric_view(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
-    lines.push(
-        Line::from(format!(
-            "{:<width_cpu$} {:<width_freq$}",
-            "CPU",
-            "Frequency",
-            width_cpu = CPU_COLUMN_WIDTH,
-            width_freq = FREQ_COLUMN_WIDTH
-        ))
-        .style(Style::default().add_modifier(Modifier::BOLD)),
-    );
+    if app.snapshot.is_empty() {
+        lines.push(Line::from("No metrics available."));
+    } else {
+        let label_width = app
+            .snapshot
+            .iter()
+            .map(|e| e.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("Metric".len());
 
-    for (index, mhz) in app.frequencies.iter().enumerate() {
-        let freq_text = if mhz.is_nan() {
-            "NaN".to_string()
-        } else {
-            format!("{:.2} MHz", mhz)
-        };
+        lines.push(
+            Line::from(format!(
+                "{:<width$}  Value",
+                "Metric",
+                width = label_width
+            ))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        );
 
-        lines.push(Line::from(format!(
-            "{:<width_cpu$} {:<width_freq$}",
-            index,
-            freq_text,
-            width_cpu = CPU_COLUMN_WIDTH,
-            width_freq = FREQ_COLUMN_WIDTH
-        )));
+        for entry in &app.snapshot {
+            lines.push(Line::from(format!(
+                "{:<width$}  {}",
+                entry.label,
+                entry.value.format(),
+                width = label_width
+            )));
+        }
     }
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(
             Block::default()
-                .title(" CPU Frequency Monitor ")
+                .title(" Hardware Monitor ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL),
         )
@@ -77,8 +77,8 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Span::raw("  "),
         Span::styled(
             format!(
-                " {} cores | {} | ↑/↓/j/k scroll ",
-                app.frequencies.len(),
+                " {} metrics | {} | h/j/k/l scroll ",
+                app.snapshot.len(),
                 refresh_text
             ),
             Style::default().fg(Color::DarkGray),

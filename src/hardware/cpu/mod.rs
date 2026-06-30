@@ -1,31 +1,8 @@
 pub mod freq;
+pub mod governor;
+pub mod topology;
 
 use crate::hardware::metric::Metric;
-use crate::hardware::HardwareInfo;
-use anyhow::Result;
-
-pub struct CpuInfo;
-
-impl HardwareInfo for CpuInfo {
-    fn run() -> Result<()> {
-        let frequencies = freq::current_frequencies_mhz()?;
-
-        for (index, mhz) in frequencies.iter().enumerate() {
-            if mhz.is_nan() {
-                println!("CPU {}: NaN", index);
-            } else {
-                println!("CPU {}: {:.2} MHz", index, mhz);
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Convenience function used by the command dispatcher.
-pub fn run() -> Result<()> {
-    CpuInfo::run()
-}
 
 /// Instantiate the default set of CPU metrics.
 ///
@@ -33,5 +10,12 @@ pub fn run() -> Result<()> {
 /// and returned from this function so [`crate::hardware::Registry::default_cpu`]
 /// picks it up automatically.
 pub fn default_metrics() -> Vec<Box<dyn Metric>> {
-    vec![Box::new(freq::CpuCurrentFreqMetric::new())]
+    vec![
+        Box::new(freq::CpuCurrentFreqMetric::new()),
+        Box::new(freq::CpuMinFreqMetric::new()),
+        Box::new(freq::CpuMaxFreqMetric::new()),
+        Box::new(governor::CpuGovernorMetric::new()),
+        Box::new(governor::CpuAvailableGovernorsMetric::new()),
+        Box::new(topology::CpuOnlineMetric::new()),
+    ]
 }

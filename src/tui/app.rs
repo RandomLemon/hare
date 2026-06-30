@@ -1,7 +1,19 @@
+use crate::hardware::{Registry, SysfsSource, Value};
 use std::time::Instant;
 
+/// One sampled metric rendered by the TUI.
+#[derive(Clone)]
+#[allow(dead_code)] // `id`/`unit` reserved for future tabs/detail views
+pub struct SnapshotEntry {
+    pub id: String,
+    pub label: String,
+    pub unit: String,
+    pub value: Value,
+}
+
 pub struct App {
-    pub frequencies: Vec<f64>,
+    pub registry: Registry,
+    pub snapshot: Vec<SnapshotEntry>,
     pub last_refresh: Option<Instant>,
     pub should_quit: bool,
     /// Scroll offset as (x, y). The UI renders content larger than the
@@ -11,8 +23,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let registry = Registry::default_cpu();
         Self {
-            frequencies: Vec::new(),
+            registry,
+            snapshot: Vec::new(),
             last_refresh: None,
             should_quit: false,
             scroll_offset: (0, 0),
@@ -20,8 +34,22 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        self.frequencies = crate::hardware::cpu::freq::current_frequencies_mhz()
-            .unwrap_or_default();
+        let source = SysfsSource::new();
+        self.snapshot = self
+            .registry
+            .iter()
+            .filter_map(|m| match m.read(&source) {
+                Ok(value) => Some(SnapshotEntry {
+                    id: m.id().to_string(),
+                    label: m.label().to_string(),
+                    unit: m.unit().to_string(),
+                    value,
+                }),
+                // Skip metrics that cannot be read on this machine rather than
+                // blanking the whole view.
+                Err(_) => None,
+            })
+            .collect();
         self.last_refresh = Some(Instant::now());
     }
 

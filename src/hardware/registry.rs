@@ -23,10 +23,12 @@ impl Registry {
         self.metrics.iter().map(|m| m.as_ref())
     }
 
+    #[allow(dead_code)] // convenience query API for future CLI/TUI consumers
     pub fn len(&self) -> usize {
         self.metrics.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.metrics.is_empty()
     }

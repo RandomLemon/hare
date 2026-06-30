@@ -6,10 +6,8 @@ use std::time::Duration;
 pub fn handle_events(app: &mut App, timeout: Duration) -> Result<()> {
     if event::poll(timeout)? {
         match event::read()? {
-            Event::Key(key) => {
-                if key.kind == KeyEventKind::Press {
-                    handle_key_event(app, key.code);
-                }
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                handle_key_event(app, key.code);
             }
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => app.scroll_up(3),

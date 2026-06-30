@@ -1,4 +1,4 @@
-pub mod args;
+mod args;
 mod handler;
 
 pub use args::{Cli, Commands};
