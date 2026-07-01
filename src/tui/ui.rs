@@ -210,7 +210,7 @@ fn draw_monitor_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_monitor_content(frame: &mut Frame, app: &App, area: Rect) {
     match app.monitor_tab {
         MonitorTab::Overview => draw_overview_table(frame, app, area),
-        MonitorTab::Cluster => draw_cluster_grouped(frame, app, area),
+        MonitorTab::Cluster => draw_cluster_table(frame, app, area),
         // List-style pages: filter snapshot by the tab's metric prefix and
         // render each metric as a per-core list.
         tab if tab.metric_prefix().is_some() => {
@@ -337,64 +337,111 @@ fn overview_data(snapshot: &[crate::tui::app::SnapshotEntry]) -> Vec<(String, St
     rows
 }
 
-/// Cluster page: cores grouped by their `cluster_id`.
+/// Cluster page: a per-core table showing each core's cluster id plus its
+/// minimum and maximum scaling frequencies.
 ///
-/// Reads the `cpu.topology.cluster` series (one `Value::Raw` per core) and
-/// groups core indices by cluster id, rendering one block per cluster with its
-/// member cores. Cores lacking `cluster_id` (unsupported kernel) fall into a
-/// `"-"` cluster.
-fn draw_cluster_grouped(frame: &mut Frame, app: &App, area: Rect) {
-    let lines = match series_for(&app.snapshot, "cpu.topology.cluster") {
-        None => vec![
-            Line::from("Cluster - no data"),
-            Line::from(""),
-            Line::from("This sub-page is a placeholder for future work."),
+/// Columns: `CPU Number | Cluster | Min Freq | Max Freq`. Data is pulled by
+/// metric id from the snapshot; missing series or NaN values render as `-`.
+fn draw_cluster_table(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = cluster_table_rows(&app.snapshot);
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
         ],
-        Some(series) => render_cluster_groups(cluster_groups(series)),
-    };
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("CPU Number"),
+            Cell::from("Cluster"),
+            Cell::from("Min Freq"),
+            Cell::from("Max Freq"),
+        ])
+        .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(
+        Block::default()
+            .title(" Cluster ")
+            .title_alignment(Alignment::Center)
+            .borders(Borders::ALL),
+    )
+    .row_highlight_style(Style::default().bg(Color::DarkGray));
 
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .title(" Cluster ")
-                .title_alignment(Alignment::Center)
-                .borders(Borders::ALL),
-        )
-        .scroll((app.scroll_offset.1, app.scroll_offset.0));
-    frame.render_widget(paragraph, area);
+    let mut state = TableState::default();
+    *state.offset_mut() = app.scroll_offset.1 as usize;
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
-/// Group core indices by their cluster id string, sorted by cluster id.
-/// Pure so it can be unit-tested.
-fn cluster_groups(series: &[Value]) -> Vec<(String, Vec<usize>)> {
-    use std::collections::BTreeMap;
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, v) in series.iter().enumerate() {
-        let cluster = match v {
-            Value::Raw(s) => s.trim().to_string(),
-            other => other.format(),
-        };
-        groups.entry(cluster).or_default().push(i);
-    }
-    groups.into_iter().collect()
+/// Build the per-core rows for the Cluster table from the current snapshot.
+fn cluster_table_rows(snapshot: &[crate::tui::app::SnapshotEntry]) -> Vec<Row<'static>> {
+    cluster_table_data(snapshot)
+        .into_iter()
+        .map(|(cpu, cluster, min, max)| {
+            Row::new(vec![
+                Cell::from(cpu),
+                Cell::from(cluster),
+                Cell::from(min),
+                Cell::from(max),
+            ])
+        })
+        .collect()
 }
 
-/// Render grouped cores as: a bold `Cluster <id>` header line, followed by one
-/// indented line listing the member cores (`cpu0, cpu1, ...`).
-fn render_cluster_groups(groups: Vec<(String, Vec<usize>)>) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for (i, (cluster, cores)) in groups.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::from(""));
-        }
-        lines.push(
-            Line::from(format!("Cluster {}", cluster))
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-        );
-        let members: Vec<String> = cores.iter().map(|c| format!("cpu{}", c)).collect();
-        lines.push(Line::from(format!("  {}", members.join(", "))));
+/// Per-core cell strings for the Cluster table: `(cpu, cluster, min, max)`.
+/// Missing series or NaN values yield `-`.
+fn cluster_table_data(
+    snapshot: &[crate::tui::app::SnapshotEntry],
+) -> Vec<(String, String, String, String)> {
+    let cluster = series_for(snapshot, "cpu.topology.cluster");
+    let min = series_for(snapshot, "cpu.freq.min");
+    let max = series_for(snapshot, "cpu.freq.max");
+
+    let core_count = cluster
+        .map(|s| s.len())
+        .or_else(|| min.map(|s| s.len()))
+        .or_else(|| max.map(|s| s.len()))
+        .unwrap_or(0);
+
+    let mut rows: Vec<(String, String, String, String)> = Vec::with_capacity(core_count);
+    for i in 0..core_count {
+        let cpu = format!("{}", i);
+        let cluster_cell = cluster
+            .and_then(|s| s.get(i))
+            .map(cluster_cell_string)
+            .unwrap_or_else(|| "-".to_string());
+        let min_cell = min
+            .and_then(|s| s.get(i))
+            .map(cluster_cell_string)
+            .unwrap_or_else(|| "-".to_string());
+        let max_cell = max
+            .and_then(|s| s.get(i))
+            .map(cluster_cell_string)
+            .unwrap_or_else(|| "-".to_string());
+        rows.push((cpu, cluster_cell, min_cell, max_cell));
     }
-    lines
+
+    if rows.is_empty() {
+        rows.push((
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ));
+    }
+    rows
+}
+
+/// Format a single `Value` for a Cluster table cell, rendering NaN/empty as `-`.
+fn cluster_cell_string(v: &Value) -> String {
+    match v {
+        Value::Freq(x) | Value::Temp(x) | Value::Percent(x) if x.is_nan() => "-".to_string(),
+        Value::Raw(s) if s.trim().is_empty() => "-".to_string(),
+        other => other.format(),
+    }
 }
 
 /// Extract the `Value::Series` slice for a given metric id, if present.
@@ -640,23 +687,64 @@ mod tests {
     }
 
     #[test]
-    fn cluster_groups_group_cores_by_id_sorted() {
+    fn cluster_table_data_per_core_with_freqs() {
         use crate::hardware::Value;
-        // cpu0 -> cluster 0, cpu1 -> cluster 4, cpu2 -> cluster 0, cpu3 -> "-"
-        let series = vec![
-            Value::Raw("0".to_string()),
-            Value::Raw("4".to_string()),
-            Value::Raw("0".to_string()),
-            Value::Raw("-".to_string()),
+        use crate::tui::app::SnapshotEntry;
+
+        let snapshot = vec![
+            SnapshotEntry {
+                id: "cpu.topology.cluster".to_string(),
+                label: "Cluster".to_string(),
+                unit: "".to_string(),
+                value: Value::Series(vec![Value::Raw("0".into()), Value::Raw("1".into())]),
+            },
+            SnapshotEntry {
+                id: "cpu.freq.min".to_string(),
+                label: "Minimum Frequency".to_string(),
+                unit: "MHz".to_string(),
+                value: Value::Series(vec![Value::Freq(800.0), Value::Freq(f64::NAN)]),
+            },
+            SnapshotEntry {
+                id: "cpu.freq.max".to_string(),
+                label: "Maximum Frequency".to_string(),
+                unit: "MHz".to_string(),
+                value: Value::Series(vec![Value::Freq(3500.0), Value::Freq(4500.0)]),
+            },
         ];
-        let groups = cluster_groups(&series);
-        // BTreeMap orders keys: "-", "0", "4".
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].0, "-");
-        assert_eq!(groups[0].1, vec![3]);
-        assert_eq!(groups[1].0, "0");
-        assert_eq!(groups[1].1, vec![0, 2]);
-        assert_eq!(groups[2].0, "4");
-        assert_eq!(groups[2].1, vec![1]);
+
+        let rows = cluster_table_data(&snapshot);
+        assert_eq!(rows.len(), 2);
+
+        // CPU number is the index; cluster sits right after it.
+        assert_eq!(rows[0].0, "0");
+        assert_eq!(rows[0].1, "0");
+        assert_eq!(rows[1].0, "1");
+        assert_eq!(rows[1].1, "1");
+
+        // Real frequencies render with MHz; NaN frequency renders as `-`.
+        assert!(rows[0].2.contains("MHz"));
+        assert_eq!(rows[1].2, "-");
+        assert!(rows[0].3.contains("MHz"));
+        assert!(rows[1].3.contains("MHz"));
+    }
+
+    #[test]
+    fn cluster_table_data_missing_series_renders_dash() {
+        use crate::hardware::Value;
+        use crate::tui::app::SnapshotEntry;
+
+        // Only the cluster series is present; min/max columns should be `-`.
+        let snapshot = vec![SnapshotEntry {
+            id: "cpu.topology.cluster".to_string(),
+            label: "Cluster".to_string(),
+            unit: "".to_string(),
+            value: Value::Series(vec![Value::Raw("-".into()), Value::Raw("0".into())]),
+        }];
+
+        let rows = cluster_table_data(&snapshot);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, "-"); // unsupported core -> `-`
+        assert_eq!(rows[0].2, "-"); // missing min freq -> `-`
+        assert_eq!(rows[0].3, "-"); // missing max freq -> `-`
     }
 }
