@@ -210,13 +210,14 @@ fn draw_monitor_sidebar(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_monitor_content(frame: &mut Frame, app: &App, area: Rect) {
     match app.monitor_tab {
         MonitorTab::Overview => draw_overview_table(frame, app, area),
+        MonitorTab::Cluster => draw_cluster_grouped(frame, app, area),
         // List-style pages: filter snapshot by the tab's metric prefix and
         // render each metric as a per-core list.
         tab if tab.metric_prefix().is_some() => {
             let prefix = tab.metric_prefix().unwrap();
             draw_metric_list(frame, app, prefix, area)
         }
-        // Unreachable: every variant is either Overview or has a prefix.
+        // Unreachable: every variant is either custom or has a prefix.
         _ => {}
     }
 }
@@ -336,6 +337,66 @@ fn overview_data(snapshot: &[crate::tui::app::SnapshotEntry]) -> Vec<(String, St
     rows
 }
 
+/// Cluster page: cores grouped by their `cluster_id`.
+///
+/// Reads the `cpu.topology.cluster` series (one `Value::Raw` per core) and
+/// groups core indices by cluster id, rendering one block per cluster with its
+/// member cores. Cores lacking `cluster_id` (unsupported kernel) fall into a
+/// `"-"` cluster.
+fn draw_cluster_grouped(frame: &mut Frame, app: &App, area: Rect) {
+    let lines = match series_for(&app.snapshot, "cpu.topology.cluster") {
+        None => vec![
+            Line::from("Cluster - no data"),
+            Line::from(""),
+            Line::from("This sub-page is a placeholder for future work."),
+        ],
+        Some(series) => render_cluster_groups(cluster_groups(series)),
+    };
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .title(" Cluster ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL),
+        )
+        .scroll((app.scroll_offset.1, app.scroll_offset.0));
+    frame.render_widget(paragraph, area);
+}
+
+/// Group core indices by their cluster id string, sorted by cluster id.
+/// Pure so it can be unit-tested.
+fn cluster_groups(series: &[Value]) -> Vec<(String, Vec<usize>)> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, v) in series.iter().enumerate() {
+        let cluster = match v {
+            Value::Raw(s) => s.trim().to_string(),
+            other => other.format(),
+        };
+        groups.entry(cluster).or_default().push(i);
+    }
+    groups.into_iter().collect()
+}
+
+/// Render grouped cores as: a bold `Cluster <id>` header line, followed by one
+/// indented line listing the member cores (`cpu0, cpu1, ...`).
+fn render_cluster_groups(groups: Vec<(String, Vec<usize>)>) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, (cluster, cores)) in groups.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(
+            Line::from(format!("Cluster {}", cluster))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        );
+        let members: Vec<String> = cores.iter().map(|c| format!("cpu{}", c)).collect();
+        lines.push(Line::from(format!("  {}", members.join(", "))));
+    }
+    lines
+}
+
 /// Extract the `Value::Series` slice for a given metric id, if present.
 fn series_for<'a>(snapshot: &'a [crate::tui::app::SnapshotEntry], id: &str) -> Option<&'a [Value]> {
     snapshot
@@ -350,7 +411,7 @@ fn series_for<'a>(snapshot: &'a [crate::tui::app::SnapshotEntry], id: &str) -> O
 /// Format a single `Value` for a table cell, rendering NaN as `—`.
 fn cell_string(v: &Value) -> String {
     match v {
-        Value::Freq(x) if x.is_nan() => "—".to_string(),
+        Value::Freq(x) | Value::Temp(x) | Value::Percent(x) if x.is_nan() => "—".to_string(),
         other => other.format(),
     }
 }
@@ -576,5 +637,26 @@ mod tests {
         assert_eq!(rows[1].1, "—");
         // A real frequency renders with its formatted value.
         assert!(rows[0].1.contains("MHz"));
+    }
+
+    #[test]
+    fn cluster_groups_group_cores_by_id_sorted() {
+        use crate::hardware::Value;
+        // cpu0 -> cluster 0, cpu1 -> cluster 4, cpu2 -> cluster 0, cpu3 -> "-"
+        let series = vec![
+            Value::Raw("0".to_string()),
+            Value::Raw("4".to_string()),
+            Value::Raw("0".to_string()),
+            Value::Raw("-".to_string()),
+        ];
+        let groups = cluster_groups(&series);
+        // BTreeMap orders keys: "-", "0", "4".
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].0, "-");
+        assert_eq!(groups[0].1, vec![3]);
+        assert_eq!(groups[1].0, "0");
+        assert_eq!(groups[1].1, vec![0, 2]);
+        assert_eq!(groups[2].0, "4");
+        assert_eq!(groups[2].1, vec![1]);
     }
 }

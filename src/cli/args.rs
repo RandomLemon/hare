@@ -30,6 +30,8 @@ pub enum CpuCommand {
     Governor(GovernorArgs),
     /// CPU topology / online status.
     Topology,
+    /// Per-core CPU utilization (sampled over a short interval).
+    Usage,
 }
 
 #[derive(Args)]

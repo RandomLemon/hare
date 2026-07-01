@@ -70,10 +70,12 @@ impl Value {
 
 /// A readable (and optionally writable) hardware parameter.
 ///
-/// Implementations are stateless: they receive the [`Source`] at call time so
-/// the same struct can be exercised against a fake backend in tests. Register
-/// instances via [`crate::hardware::registry::Registry`] to expose them to the
-/// CLI and TUI without touching dispatch code.
+/// Implementations are usually stateless: they receive the [`Source`] at call
+/// time so the same struct can be exercised against a fake backend in tests.
+/// Stateful metrics (e.g. utilization, which needs the previous sample) may
+/// hold interior-mutable state behind a `Mutex` while still taking `&self`.
+/// Register instances via [`crate::hardware::registry::Registry`] to expose
+/// them to the CLI and TUI without touching dispatch code.
 pub trait Metric: Send + Sync {
     /// Stable identifier, e.g. `"cpu.freq.cur"`.
     fn id(&self) -> &str;

@@ -42,6 +42,7 @@ impl Page {
 pub enum MonitorTab {
     Overview,
     Governor,
+    Cluster,
 }
 
 impl MonitorTab {
@@ -50,6 +51,7 @@ impl MonitorTab {
         match self {
             MonitorTab::Overview => "Overview",
             MonitorTab::Governor => "Governor",
+            MonitorTab::Cluster => "Cluster",
         }
     }
 
@@ -60,11 +62,12 @@ impl MonitorTab {
         match self {
             MonitorTab::Overview => None,
             MonitorTab::Governor => Some("cpu.governor"),
+            MonitorTab::Cluster => None,
         }
     }
 
     /// Sub-tabs in display order.
-    pub const ALL: [MonitorTab; 2] = [MonitorTab::Overview, MonitorTab::Governor];
+    pub const ALL: [MonitorTab; 3] = [MonitorTab::Overview, MonitorTab::Governor, MonitorTab::Cluster];
 
     /// Next sub-tab in display order (wraps around).
     pub fn next(self) -> Self {

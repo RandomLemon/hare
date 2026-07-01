@@ -1,6 +1,8 @@
 use crate::cli::args::{CpuArgs, CpuCommand, Commands, FreqMetric, GovernorAction};
 use crate::hardware::{Registry, SysfsSource, Value};
 use anyhow::{Result, anyhow};
+use std::thread;
+use std::time::Duration;
 
 /// Dispatch a parsed top-level command.
 pub fn dispatch(command: Commands) -> Result<()> {
@@ -31,6 +33,7 @@ fn dispatch_cpu(cpu: CpuArgs) -> Result<()> {
             }
         },
         CpuCommand::Topology => print_metric(&registry, &source, "cpu.topology.online"),
+        CpuCommand::Usage => print_delta_metric(&registry, &source, "cpu.usage"),
     }
 }
 
@@ -41,6 +44,30 @@ fn print_metric(registry: &Registry, source: &SysfsSource, id: &str) -> Result<(
         .ok_or_else(|| anyhow!("no metric registered with id `{}`", id))?;
 
     let value = metric.read(source)?;
+    println!("{} ({})", metric.label(), metric.id());
+    for line in value.lines() {
+        println!("  {}", line);
+    }
+    Ok(())
+}
+
+/// Print a delta-based metric (e.g. utilization): seed state with one read,
+/// wait briefly, then read again so the returned value reflects a real delta.
+fn print_delta_metric(
+    registry: &Registry,
+    source: &SysfsSource,
+    id: &str,
+) -> Result<()> {
+    let metric = registry
+        .iter()
+        .find(|m| m.id() == id)
+        .ok_or_else(|| anyhow!("no metric registered with id `{}`", id))?;
+
+    // First read seeds the previous-sample state; its value (NaN) is discarded.
+    let _ = metric.read(source)?;
+    thread::sleep(Duration::from_millis(100));
+    let value = metric.read(source)?;
+
     println!("{} ({})", metric.label(), metric.id());
     for line in value.lines() {
         println!("  {}", line);

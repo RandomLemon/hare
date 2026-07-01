@@ -1,6 +1,7 @@
 pub mod freq;
 pub mod governor;
 pub mod topology;
+pub mod usage;
 
 use crate::hardware::metric::Metric;
 
@@ -17,5 +18,7 @@ pub fn default_metrics() -> Vec<Box<dyn Metric>> {
         Box::new(governor::CpuGovernorMetric::new()),
         Box::new(governor::CpuAvailableGovernorsMetric::new()),
         Box::new(topology::CpuOnlineMetric::new()),
+        Box::new(topology::CpuClusterMetric::new()),
+        Box::new(usage::CpuUtilizationMetric::new()),
     ]
 }
