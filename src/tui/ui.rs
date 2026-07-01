@@ -1,10 +1,11 @@
-use crate::tui::app::{App, Page};
+use crate::tui::app::{App, MonitorTab, Page};
+use crate::hardware::Value;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
 };
 
 /// App title shown on the left of the title bar.
@@ -137,45 +138,252 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_monitor(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
+    let (sidebar, content) = monitor_layout(area);
+    draw_monitor_sidebar(frame, app, sidebar);
+    draw_monitor_content(frame, app, content);
+}
 
-    if app.snapshot.is_empty() {
-        lines.push(Line::from("No metrics available."));
-    } else {
-        let label_width = app
-            .snapshot
-            .iter()
-            .map(|e| e.label.chars().count())
-            .max()
-            .unwrap_or(0)
-            .max("Metric".len());
+/// Split the Monitor body into a left sidebar (vertical tabs) and content area.
+pub fn monitor_layout(body: Rect) -> (Rect, Rect) {
+    let sidebar_w = sidebar_width();
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sidebar_w), Constraint::Min(0)])
+        .split(body);
+    (chunks[0], chunks[1])
+}
 
-        lines.push(
-            Line::from(format!("{:<width$}  Value", "Metric", width = label_width))
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-        );
+/// Width of the left sidebar: longest tab label + padding for breathing room.
+fn sidebar_width() -> u16 {
+    let max_label = MonitorTab::ALL
+        .iter()
+        .map(|t| line_width(t.name()))
+        .max()
+        .unwrap_or(0);
+    // 1 leading space + label + 1 trailing space.
+    (max_label + 2) as u16
+}
 
-        for entry in &app.snapshot {
-            lines.push(Line::from(format!(
-                "{:<width$}  {}",
-                entry.label,
-                entry.value.format(),
-                width = label_width
-            )));
+/// Per-sub-tab hit-rectangles within the sidebar, for mouse click handling.
+pub fn monitor_tab_rects(body: Rect) -> Vec<(MonitorTab, Rect)> {
+    let (sidebar, _content) = monitor_layout(body);
+    MonitorTab::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            (
+                *tab,
+                Rect {
+                    x: sidebar.x,
+                    y: sidebar.y + i as u16,
+                    width: sidebar.width,
+                    height: 1,
+                },
+            )
+        })
+        .collect()
+}
+
+fn draw_monitor_sidebar(frame: &mut Frame, app: &App, area: Rect) {
+    let lines: Vec<Line> = MonitorTab::ALL
+        .iter()
+        .map(|tab| {
+            let label = format!(" {} ", tab.name());
+            let style = if *tab == app.monitor_tab {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Line::from(vec![Span::styled(label, style)])
+        })
+        .collect();
+
+    // Borderless sidebar so hit-rects (computed from the same area) line up
+    // exactly with the rendered rows. The content block provides the visual
+    // frame on the right.
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn draw_monitor_content(frame: &mut Frame, app: &App, area: Rect) {
+    match app.monitor_tab {
+        MonitorTab::Overview => draw_overview_table(frame, app, area),
+        // List-style pages: filter snapshot by the tab's metric prefix and
+        // render each metric as a per-core list.
+        tab if tab.metric_prefix().is_some() => {
+            let prefix = tab.metric_prefix().unwrap();
+            draw_metric_list(frame, app, prefix, area)
         }
+        // Unreachable: every variant is either Overview or has a prefix.
+        _ => {}
     }
+}
+
+/// Render a list-style sub-page: metrics whose id starts with `prefix`,
+/// each metric as a labelled header with per-core values expanded below.
+fn draw_metric_list(frame: &mut Frame, app: &App, prefix: &str, area: Rect) {
+    let entries: Vec<&crate::tui::app::SnapshotEntry> = app
+        .snapshot
+        .iter()
+        .filter(|e| e.id.starts_with(prefix))
+        .collect();
+
+    let lines = if entries.is_empty() {
+        vec![
+            Line::from(format!("{} - no data", app.monitor_tab.name())),
+            Line::from(""),
+            Line::from("This sub-page is a placeholder for future work."),
+        ]
+    } else {
+        render_metric_lines(&entries)
+    };
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(
             Block::default()
-                .title(format!(" {} ", app.current_page.name()))
+                .title(format!(" {} ", app.monitor_tab.name()))
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL),
         )
-        // Paragraph::scroll takes (y, x), so we map our (x, y) offset accordingly.
         .scroll((app.scroll_offset.1, app.scroll_offset.0));
 
     frame.render_widget(paragraph, area);
+}
+
+/// Overview page: a per-core table aggregating current frequency and usage.
+///
+/// Columns: `CPU Number | Current Freq | Usage`. Data is pulled by metric id
+/// from the snapshot; missing series (e.g. `cpu.usage` not implemented yet)
+/// render as `—` so the table is future-proof — registering a `cpu.usage`
+/// metric later fills the column automatically.
+fn draw_overview_table(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = overview_rows(&app.snapshot);
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(12),
+            Constraint::Length(12),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            Cell::from("CPU Number"),
+            Cell::from("Current Freq"),
+            Cell::from("Usage"),
+        ])
+        .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(
+        Block::default()
+            .title(" Overview ")
+            .title_alignment(Alignment::Center)
+            .borders(Borders::ALL),
+    )
+    .row_highlight_style(Style::default().bg(Color::DarkGray));
+
+    let mut state = TableState::default();
+    *state.offset_mut() = app.scroll_offset.1 as usize;
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+/// Build the per-core rows for the Overview table from the current snapshot.
+/// Pure (no `Frame`) so it can be unit-tested.
+fn overview_rows(snapshot: &[crate::tui::app::SnapshotEntry]) -> Vec<Row<'static>> {
+    overview_data(snapshot)
+        .into_iter()
+        .map(|(cpu, freq, usage)| {
+            Row::new(vec![
+                Cell::from(cpu),
+                Cell::from(freq),
+                Cell::from(usage),
+            ])
+        })
+        .collect()
+}
+
+/// Per-core cell strings for the Overview table: `(cpu_number, current_freq, usage)`.
+/// Missing series or NaN values yield `—`.
+fn overview_data(snapshot: &[crate::tui::app::SnapshotEntry]) -> Vec<(String, String, String)> {
+    let freq = series_for(snapshot, "cpu.freq.cur");
+    let usage = series_for(snapshot, "cpu.usage");
+
+    let core_count = freq
+        .map(|s| s.len())
+        .or_else(|| usage.map(|s| s.len()))
+        .unwrap_or(0);
+
+    let mut rows: Vec<(String, String, String)> = Vec::with_capacity(core_count);
+    for i in 0..core_count {
+        let cpu = format!("{}", i);
+        let freq_cell = freq
+            .and_then(|s| s.get(i))
+            .map(cell_string)
+            .unwrap_or_else(|| "—".to_string());
+        let usage_cell = usage
+            .and_then(|s| s.get(i))
+            .map(cell_string)
+            .unwrap_or_else(|| "—".to_string());
+        rows.push((cpu, freq_cell, usage_cell));
+    }
+
+    if rows.is_empty() {
+        rows.push(("—".to_string(), "—".to_string(), "—".to_string()));
+    }
+    rows
+}
+
+/// Extract the `Value::Series` slice for a given metric id, if present.
+fn series_for<'a>(snapshot: &'a [crate::tui::app::SnapshotEntry], id: &str) -> Option<&'a [Value]> {
+    snapshot
+        .iter()
+        .find(|e| e.id == id)
+        .and_then(|e| match &e.value {
+            Value::Series(items) => Some(items.as_slice()),
+            _ => None,
+        })
+}
+
+/// Format a single `Value` for a table cell, rendering NaN as `—`.
+fn cell_string(v: &Value) -> String {
+    match v {
+        Value::Freq(x) if x.is_nan() => "—".to_string(),
+        other => other.format(),
+    }
+}
+
+/// Render metrics as a hierarchical list: each metric's label is a sub-header,
+/// and per-core `Series` values expand into one indented line per core.
+fn render_metric_lines<'a>(
+    entries: &[&'a crate::tui::app::SnapshotEntry],
+) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line<'a>> = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(
+            Line::from(entry.label.as_str())
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        );
+
+        match &entry.value {
+            Value::Series(items) => {
+                for (idx, v) in items.iter().enumerate() {
+                    lines.push(Line::from(format!("  #{}: {}", idx, v.format())));
+                }
+            }
+            other => {
+                lines.push(Line::from(format!("  {}", other.format())));
+            }
+        }
+    }
+
+    lines
 }
 
 fn draw_control(frame: &mut Frame, app: &App, area: Rect) {
@@ -218,7 +426,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("  "),
         Span::styled(
             format!(
-                " 1/2/3 or click tabs | {} metrics | {} | hjkl scroll ",
+                " 1/2/3 or click tabs | Tab/Shift+Tab sub-tabs | {} metrics | {} | hjkl scroll ",
                 app.snapshot.len(),
                 refresh_text
             ),
@@ -287,11 +495,86 @@ mod tests {
             let col = rect.x + rect.width / 2;
             let hit = rects
                 .iter()
-                .find(|(_, r)| {
-                    col >= r.x && col < r.x + r.width && rect.y >= r.y && rect.y < r.y + r.height
-                })
+                .find(|(_, r)| col >= r.x && col < r.x + r.width && rect.y >= r.y && rect.y < r.y + r.height)
                 .map(|(p, _)| *p);
             assert_eq!(hit, Some(*page));
         }
+    }
+
+    #[test]
+    fn monitor_sidebar_tabs_stack_vertically_without_overlap() {
+        use crate::tui::app::MonitorTab;
+        let body = Rect {
+            x: 0,
+            y: 1,
+            width: 80,
+            height: 22,
+        };
+        let (sidebar, content) = monitor_layout(body);
+        // Sidebar is on the left, content to its right.
+        assert!(sidebar.x <= content.x);
+        assert!(sidebar.width < body.width);
+
+        let rects = monitor_tab_rects(body);
+        assert_eq!(rects.len(), MonitorTab::ALL.len());
+
+        let mut prev_bottom = None;
+        for (i, (tab, rect)) in rects.iter().enumerate() {
+            // Each tab fills the sidebar width and is one row tall.
+            assert_eq!(rect.width, sidebar.width);
+            assert_eq!(rect.height, 1);
+            assert_eq!(rect.x, sidebar.x);
+            // Stacked top-to-bottom in enum order.
+            assert_eq!(rect.y, sidebar.y + i as u16);
+            if let Some(bottom) = prev_bottom {
+                assert!(rect.y >= bottom);
+            }
+            prev_bottom = Some(rect.y + rect.height);
+            assert!(rect.y < sidebar.y + sidebar.height);
+            assert_eq!(*tab, MonitorTab::ALL[i]);
+        }
+    }
+
+    #[test]
+    fn overview_rows_match_freq_series_and_pad_missing_usage() {
+        use crate::hardware::Value;
+        use crate::tui::app::SnapshotEntry;
+
+        let snapshot = vec![
+            SnapshotEntry {
+                id: "cpu.freq.cur".to_string(),
+                label: "Current Frequency".to_string(),
+                unit: "MHz".to_string(),
+                value: Value::Series(vec![
+                    Value::Freq(2400.0),
+                    Value::Freq(f64::NAN),
+                    Value::Freq(1800.0),
+                ]),
+            },
+            // No `cpu.usage` entry -> Usage column should be `—`.
+            SnapshotEntry {
+                id: "cpu.governor".to_string(),
+                label: "Scaling Governor".to_string(),
+                unit: "".to_string(),
+                value: Value::Series(vec![Value::Enum("powersave".into())]),
+            },
+        ];
+
+        let rows = overview_data(&snapshot);
+        assert_eq!(rows.len(), 3);
+
+        // Row count tracks the freq series length; CPU number is the index.
+        assert_eq!(rows[0].0, "0");
+        assert_eq!(rows[2].0, "2");
+
+        // Missing usage => every Usage cell is "—".
+        for (_cpu, _freq, usage) in &rows {
+            assert_eq!(usage, "—");
+        }
+
+        // NaN frequency should render as "—".
+        assert_eq!(rows[1].1, "—");
+        // A real frequency renders with its formatted value.
+        assert!(rows[0].1.contains("MHz"));
     }
 }

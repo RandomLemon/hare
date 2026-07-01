@@ -32,6 +32,54 @@ impl Page {
     pub const ALL: [Page; 3] = [Page::Monitor, Page::Control, Page::Preset];
 }
 
+/// A sub-tab within the Monitor page, selectable from the left sidebar.
+///
+/// Adding a new monitor sub-page only requires adding a variant here, an entry
+/// in `ALL`, and (for list-style pages) a `metric_prefix` mapping. Pages with
+/// custom rendering return `None` from `metric_prefix` and get a dedicated
+/// match arm in the content renderer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MonitorTab {
+    Overview,
+    Governor,
+}
+
+impl MonitorTab {
+    /// Display name shown in the sidebar tab.
+    pub fn name(&self) -> &'static str {
+        match self {
+            MonitorTab::Overview => "Overview",
+            MonitorTab::Governor => "Governor",
+        }
+    }
+
+    /// Metrics whose id starts with this prefix are shown on list-style
+    /// sub-pages. `None` means the page renders custom content (e.g. a table
+    /// aggregating several metrics by core index).
+    pub fn metric_prefix(&self) -> Option<&'static str> {
+        match self {
+            MonitorTab::Overview => None,
+            MonitorTab::Governor => Some("cpu.governor"),
+        }
+    }
+
+    /// Sub-tabs in display order.
+    pub const ALL: [MonitorTab; 2] = [MonitorTab::Overview, MonitorTab::Governor];
+
+    /// Next sub-tab in display order (wraps around).
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.as_slice().iter().position(|t| *t == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+
+    /// Previous sub-tab in display order (wraps around).
+    pub fn prev(self) -> Self {
+        let idx = Self::ALL.as_slice().iter().position(|t| *t == self).unwrap_or(0);
+        let len = Self::ALL.len();
+        Self::ALL[(idx + len - 1) % len]
+    }
+}
+
 /// One sampled metric rendered by the TUI.
 #[derive(Clone)]
 #[allow(dead_code)] // `id`/`unit` reserved for future tabs/detail views
@@ -48,6 +96,8 @@ pub struct App {
     pub last_refresh: Option<Instant>,
     pub should_quit: bool,
     pub current_page: Page,
+    /// Active sub-tab within the Monitor page.
+    pub monitor_tab: MonitorTab,
     /// Scroll offset as (x, y). The UI renders content larger than the
     /// terminal area and uses this offset to pan around it.
     pub scroll_offset: (u16, u16),
@@ -62,6 +112,7 @@ impl App {
             last_refresh: None,
             should_quit: false,
             current_page: Page::Monitor,
+            monitor_tab: MonitorTab::Overview,
             scroll_offset: (0, 0),
         }
     }
@@ -72,6 +123,26 @@ impl App {
             self.current_page = page;
             self.scroll_offset = (0, 0);
         }
+    }
+
+    /// Switch to a Monitor sub-tab; resets scroll to the top on change.
+    pub fn set_monitor_tab(&mut self, tab: MonitorTab) {
+        if self.monitor_tab != tab {
+            self.monitor_tab = tab;
+            self.scroll_offset = (0, 0);
+        }
+    }
+
+    /// Cycle to the next Monitor sub-tab (Tab key).
+    pub fn next_monitor_tab(&mut self) {
+        let next = self.monitor_tab.next();
+        self.set_monitor_tab(next);
+    }
+
+    /// Cycle to the previous Monitor sub-tab (Shift+Tab).
+    pub fn prev_monitor_tab(&mut self) {
+        let prev = self.monitor_tab.prev();
+        self.set_monitor_tab(prev);
     }
 
     /// Esc semantics: return to the monitor page, or quit if already there.

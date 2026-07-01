@@ -15,7 +15,7 @@ pub fn handle_events(app: &mut App, timeout: Duration) -> Result<()> {
                 MouseEventKind::ScrollUp => app.scroll_up(3),
                 MouseEventKind::ScrollDown => app.scroll_down(3),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    handle_tab_click(app, mouse.column, mouse.row);
+                    handle_click(app, mouse.column, mouse.row);
                 }
                 _ => {}
             },
@@ -32,6 +32,9 @@ fn handle_key_event(app: &mut App, code: KeyCode) {
         KeyCode::Char('1') => app.set_page(Page::Monitor),
         KeyCode::Char('2') => app.set_page(Page::Control),
         KeyCode::Char('3') => app.set_page(Page::Preset),
+        // Tab / Shift+Tab cycle Monitor sub-tabs (only meaningful on Monitor).
+        KeyCode::Tab if app.current_page == Page::Monitor => app.next_monitor_tab(),
+        KeyCode::BackTab if app.current_page == Page::Monitor => app.prev_monitor_tab(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
         KeyCode::Left | KeyCode::Char('h') => app.scroll_left(3),
@@ -44,8 +47,9 @@ fn handle_key_event(app: &mut App, code: KeyCode) {
     }
 }
 
-/// Handle a left-click: if it lands on a title-bar tab, switch to that page.
-fn handle_tab_click(app: &mut App, column: u16, row: u16) {
+/// Handle a left-click: first try the top-level title-bar tabs, then (when on
+/// the Monitor page) the left sidebar sub-tabs.
+fn handle_click(app: &mut App, column: u16, row: u16) {
     let (w, h) = crossterm::terminal::size().unwrap_or((0, 0));
     let screen = Rect {
         x: 0,
@@ -55,13 +59,26 @@ fn handle_tab_click(app: &mut App, column: u16, row: u16) {
     };
 
     for (page, rect) in ui::tab_rects(screen, app.current_page) {
-        if row >= rect.y
-            && row < rect.y.saturating_add(rect.height)
-            && column >= rect.x
-            && column < rect.x.saturating_add(rect.width)
-        {
+        if hit(rect, column, row) {
             app.set_page(page);
-            break;
+            return;
         }
     }
+
+    if app.current_page == Page::Monitor {
+        let (_header, body, _status) = ui::layout(screen);
+        for (tab, rect) in ui::monitor_tab_rects(body) {
+            if hit(rect, column, row) {
+                app.set_monitor_tab(tab);
+                return;
+            }
+        }
+    }
+}
+
+fn hit(rect: Rect, column: u16, row: u16) -> bool {
+    row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+        && column >= rect.x
+        && column < rect.x.saturating_add(rect.width)
 }
