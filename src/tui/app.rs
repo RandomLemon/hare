@@ -13,9 +13,9 @@ impl Page {
     /// Shortcut digit shown in the tab label and handled by the keyboard.
     pub fn digit(&self) -> char {
         match self {
-            Page::Monitor => '1',
-            Page::Control => '2',
-            Page::Preset => '3',
+            Page::Monitor => 'm',
+            Page::Control => 'c',
+            Page::Preset => 'p',
         }
     }
 

@@ -36,15 +36,15 @@ fn handle_key_event(app: &mut App, code: KeyCode) {
             app.escape();
             return;
         }
-        KeyCode::Char('1') => {
+        KeyCode::Char('m') => {
             app.set_page(Page::Monitor);
             return;
         }
-        KeyCode::Char('2') => {
+        KeyCode::Char('c') => {
             app.set_page(Page::Control);
             return;
         }
-        KeyCode::Char('3') => {
+        KeyCode::Char('p') => {
             app.set_page(Page::Preset);
             return;
         }

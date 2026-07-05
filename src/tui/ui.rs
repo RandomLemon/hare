@@ -719,7 +719,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw("  "),
         Span::styled(
             format!(
-                " 1/2/3 or click tabs | Tab/Shift+Tab sub-tabs | {} metrics | {} | hjkl scroll ",
+                " m/c/p or click tabs | Tab/Shift+Tab sub-tabs | {} metrics | {} | hjkl scroll ",
                 app.snapshot.len(),
                 refresh_text
             ),
