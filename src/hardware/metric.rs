@@ -106,4 +106,17 @@ pub trait Metric: Send + Sync {
     fn write(&self, _source: &dyn Source, _value: &Value) -> Result<()> {
         anyhow::bail!("metric {} is read-only", self.id())
     }
+
+    /// Whether this parameter supports per-core writes (for series metrics
+    /// where each core can be controlled independently). Defaults to `false`.
+    fn is_core_writable(&self) -> bool {
+        false
+    }
+
+    /// Write a value to a single core of a per-core series metric. Only called
+    /// when [`is_core_writable`] returns `true`. Implementations should isolate
+    /// failures: an error for one core must not prevent writes to other cores.
+    fn write_core(&self, _source: &dyn Source, _core: usize, _value: &Value) -> Result<()> {
+        anyhow::bail!("metric {} is not per-core writable", self.id())
+    }
 }

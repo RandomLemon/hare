@@ -73,6 +73,14 @@ impl Metric for CpuMinFreqMetric {
                 .collect(),
         ))
     }
+
+    fn is_core_writable(&self) -> bool {
+        true
+    }
+
+    fn write_core(&self, source: &dyn Source, core: usize, value: &Value) -> Result<()> {
+        write_freq_core(source, core, value, "cpufreq/scaling_min_freq")
+    }
 }
 
 /// Metric: maximum scaling frequency of every CPU core (MHz).
@@ -105,6 +113,39 @@ impl Metric for CpuMaxFreqMetric {
                 .collect(),
         ))
     }
+
+    fn is_core_writable(&self) -> bool {
+        true
+    }
+
+    fn write_core(&self, source: &dyn Source, core: usize, value: &Value) -> Result<()> {
+        write_freq_core(source, core, value, "cpufreq/scaling_max_freq")
+    }
+}
+
+/// Shared per-core frequency writer: accepts `Value::Freq(mhz)` (NaN/<=0
+/// rejected) and writes the equivalent kHz to the given cpufreq file.
+fn write_freq_core(
+    source: &dyn Source,
+    core: usize,
+    value: &Value,
+    rel: &str,
+) -> Result<()> {
+    let mhz = match value {
+        Value::Freq(m) => *m,
+        _ => anyhow::bail!("expected Freq (MHz) value, got {:?}", value),
+    };
+    if mhz.is_nan() || mhz <= 0.0 {
+        anyhow::bail!("invalid frequency value: {}", mhz);
+    }
+    let khz = (mhz * 1000.0) as u64;
+    let path = Path::new(SYS_CPU)
+        .join(format!("cpu{}", core))
+        .join(rel);
+    source
+        .write(&path, &khz.to_string())
+        .with_context(|| format!("failed to write {} for core {}", rel, core))?;
+    Ok(())
 }
 
 fn per_core_mhz(source: &dyn Source, rel: &str) -> Result<Vec<f64>> {
@@ -147,9 +188,12 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    use std::sync::Mutex;
+
     struct FakeSource {
         files: HashMap<PathBuf, String>,
         dirs: HashMap<PathBuf, Vec<PathBuf>>,
+        writes: Mutex<Vec<(PathBuf, String)>>,
     }
 
     impl Source for FakeSource {
@@ -160,8 +204,12 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("not found: {}", path.display()))
         }
 
-        fn write(&self, _path: &Path, _content: &str) -> Result<()> {
-            unimplemented!()
+        fn write(&self, path: &Path, content: &str) -> Result<()> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), content.to_string()));
+            Ok(())
         }
 
         fn exists(&self, path: &Path) -> bool {
@@ -196,7 +244,11 @@ mod tests {
         files.insert(cpu0.join("cpufreq/scaling_max_freq"), "3500000\n".to_string());
         files.insert(cpu1.join("cpufreq/scaling_max_freq"), "3500000\n".to_string());
 
-        FakeSource { files, dirs }
+        FakeSource {
+            files,
+            dirs,
+            writes: Mutex::new(Vec::new()),
+        }
     }
 
     #[test]
@@ -239,5 +291,43 @@ mod tests {
         assert_eq!(m.id(), "cpu.freq.cur");
         assert_eq!(m.unit(), "MHz");
         assert!(!m.is_writable());
+    }
+
+    #[test]
+    fn min_max_write_core_writes_khz_to_per_core_file() {
+        let src = fake_source();
+
+        CpuMinFreqMetric::new()
+            .write_core(&src, 0, &Value::Freq(1000.0))
+            .unwrap();
+        CpuMaxFreqMetric::new()
+            .write_core(&src, 1, &Value::Freq(3000.0))
+            .unwrap();
+
+        let writes = src.writes.lock().unwrap();
+        // 1000 MHz -> 1000000 kHz, written to cpu0's scaling_min_freq.
+        assert!(writes.iter().any(|(p, v)| {
+            p.to_string_lossy().contains("cpu0/cpufreq/scaling_min_freq") && v == "1000000"
+        }));
+        // 3000 MHz -> 3000000 kHz, written to cpu1's scaling_max_freq.
+        assert!(writes.iter().any(|(p, v)| {
+            p.to_string_lossy().contains("cpu1/cpufreq/scaling_max_freq") && v == "3000000"
+        }));
+    }
+
+    #[test]
+    fn min_max_write_core_rejects_nan_and_non_freq() {
+        let src = fake_source();
+        let min = CpuMinFreqMetric::new();
+        assert!(min.write_core(&src, 0, &Value::Freq(f64::NAN)).is_err());
+        assert!(min.write_core(&src, 0, &Value::Bool(true)).is_err());
+        assert!(min.write_core(&src, 0, &Value::Freq(0.0)).is_err());
+    }
+
+    #[test]
+    fn min_max_are_core_writable() {
+        assert!(CpuMinFreqMetric::new().is_core_writable());
+        assert!(CpuMaxFreqMetric::new().is_core_writable());
+        assert!(!CpuCurrentFreqMetric::new().is_core_writable());
     }
 }

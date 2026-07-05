@@ -1,6 +1,6 @@
 use crate::hardware::metric::{Metric, Value};
 use crate::hardware::source::Source;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 const SYS_CPU: &str = "/sys/devices/system/cpu";
@@ -73,6 +73,36 @@ impl Metric for CpuOnlineMetric {
             .collect();
         Ok(Value::Series(values))
     }
+
+    fn is_core_writable(&self) -> bool {
+        true
+    }
+
+    fn write_core(&self, source: &dyn Source, core: usize, value: &Value) -> Result<()> {
+        let online = match value {
+            Value::Bool(b) => *b,
+            _ => anyhow::bail!("expected Bool for online status, got {:?}", value),
+        };
+        let path = Path::new(SYS_CPU)
+            .join(format!("cpu{}", core))
+            .join("online");
+        if !source.exists(&path) {
+            anyhow::bail!("core {} cannot be onlined/offlined (no online file)", core);
+        }
+        source
+            .write(&path, if online { "1" } else { "0" })
+            .with_context(|| format!("failed to set online status for core {}", core))?;
+        Ok(())
+    }
+}
+
+/// Whether a given core exposes an `online` file (i.e. can be toggled). Boot
+/// cores like cpu0 typically have no `online` file and are always online.
+pub fn core_has_online_file(source: &dyn Source, core: usize) -> bool {
+    let path = Path::new(SYS_CPU)
+        .join(format!("cpu{}", core))
+        .join("online");
+    source.exists(&path)
 }
 
 /// Metric: cluster id of every CPU core, from `topology/cluster_id`.
@@ -122,9 +152,12 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    use std::sync::Mutex;
+
     struct FakeSource {
         files: HashMap<PathBuf, String>,
         dirs: HashMap<PathBuf, Vec<PathBuf>>,
+        writes: Mutex<Vec<(PathBuf, String)>>,
     }
 
     impl Source for FakeSource {
@@ -134,8 +167,12 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("not found: {}", path.display()))
         }
-        fn write(&self, _path: &Path, _content: &str) -> Result<()> {
-            unimplemented!()
+        fn write(&self, path: &Path, content: &str) -> Result<()> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), content.to_string()));
+            Ok(())
         }
         fn exists(&self, path: &Path) -> bool {
             self.files.contains_key(path) || self.dirs.contains_key(path)
@@ -164,7 +201,11 @@ mod tests {
             files.insert(cpu1.join("topology/cluster_id"), "4\n".to_string());
             // cpu3 lacks cluster_id -> "-".
         }
-        FakeSource { files, dirs }
+        FakeSource {
+            files,
+            dirs,
+            writes: Mutex::new(Vec::new()),
+        }
     }
 
     #[test]
@@ -208,5 +249,43 @@ mod tests {
         let m = CpuClusterMetric::new();
         assert_eq!(m.id(), "cpu.topology.cluster");
         assert!(!m.is_writable());
+    }
+
+    #[test]
+    fn online_write_core_writes_one_or_zero_and_skips_locked() {
+        let src = fake_source(true); // cpu0/cpu1 have online, cpu3 does not
+        let m = CpuOnlineMetric::new();
+
+        // cpu1 present -> writes "0" to its online file.
+        m.write_core(&src, 1, &Value::Bool(false)).unwrap();
+        assert_eq!(
+            src.writes.lock().unwrap().iter().filter(|(_, v)| v == "0").count(),
+            1
+        );
+
+        // cpu3 (no online file) -> error, nothing written for it.
+        let err = m.write_core(&src, 3, &Value::Bool(false));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn online_write_core_rejects_non_bool() {
+        let src = fake_source(true);
+        let m = CpuOnlineMetric::new();
+        assert!(m.write_core(&src, 0, &Value::Raw("1".into())).is_err());
+    }
+
+    #[test]
+    fn core_has_online_file_reflects_presence() {
+        let src = fake_source(true); // cpu0/cpu1 have online, cpu3 does not
+        assert!(core_has_online_file(&src, 0));
+        assert!(core_has_online_file(&src, 1));
+        assert!(!core_has_online_file(&src, 3));
+    }
+
+    #[test]
+    fn online_is_core_writable() {
+        assert!(CpuOnlineMetric::new().is_core_writable());
+        assert!(!CpuClusterMetric::new().is_core_writable());
     }
 }

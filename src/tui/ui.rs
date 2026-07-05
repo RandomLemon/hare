@@ -1,4 +1,4 @@
-use crate::tui::app::{App, MonitorTab, Page};
+use crate::tui::app::{App, ControlTab, FreqCol, MonitorTab, Page};
 use crate::hardware::Value;
 use ratatui::{
     Frame,
@@ -138,14 +138,32 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_monitor(frame: &mut Frame, app: &App, area: Rect) {
-    let (sidebar, content) = monitor_layout(area);
-    draw_monitor_sidebar(frame, app, sidebar);
+    let labels = tab_labels(&MonitorTab::ALL, MonitorTab::name);
+    let (sidebar, content) = sidebar_layout(area, &labels);
+    draw_sidebar(frame, sidebar, &labels, monitor_tab_index(app));
     draw_monitor_content(frame, app, content);
 }
 
-/// Split the Monitor body into a left sidebar (vertical tabs) and content area.
-pub fn monitor_layout(body: Rect) -> (Rect, Rect) {
-    let sidebar_w = sidebar_width();
+fn monitor_tab_index(app: &App) -> usize {
+    MonitorTab::ALL
+        .iter()
+        .position(|t| *t == app.monitor_tab)
+        .unwrap_or(0)
+}
+
+// ----- Generic sidebar (shared by Monitor and Control pages) -----
+
+/// Build a label list from an enum's `ALL` array.
+fn tab_labels<T, F>(all: &[T], name: F) -> Vec<&'static str>
+where
+    F: Fn(&T) -> &'static str,
+{
+    all.iter().map(name).collect()
+}
+
+/// Split a body area into a left sidebar (vertical tabs) and a content area.
+pub fn sidebar_layout(body: Rect, labels: &[&str]) -> (Rect, Rect) {
+    let sidebar_w = sidebar_width(labels);
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(sidebar_w), Constraint::Min(0)])
@@ -153,43 +171,56 @@ pub fn monitor_layout(body: Rect) -> (Rect, Rect) {
     (chunks[0], chunks[1])
 }
 
-/// Width of the left sidebar: longest tab label + padding for breathing room.
-fn sidebar_width() -> u16 {
-    let max_label = MonitorTab::ALL
-        .iter()
-        .map(|t| line_width(t.name()))
-        .max()
-        .unwrap_or(0);
-    // 1 leading space + label + 1 trailing space.
+/// Width of the left sidebar: longest label + 2 chars of padding.
+fn sidebar_width(labels: &[&str]) -> u16 {
+    let max_label = labels.iter().map(|s| line_width(s)).max().unwrap_or(0);
     (max_label + 2) as u16
 }
 
-/// Per-sub-tab hit-rectangles within the sidebar, for mouse click handling.
-pub fn monitor_tab_rects(body: Rect) -> Vec<(MonitorTab, Rect)> {
-    let (sidebar, _content) = monitor_layout(body);
-    MonitorTab::ALL
+/// Per-tab hit-rectangles within the sidebar (index-aligned), for mouse clicks.
+pub fn sidebar_tab_rects(body: Rect, labels: &[&str]) -> Vec<Rect> {
+    let (sidebar, _content) = sidebar_layout(body, labels);
+    labels
         .iter()
         .enumerate()
-        .map(|(i, tab)| {
-            (
-                *tab,
-                Rect {
-                    x: sidebar.x,
-                    y: sidebar.y + i as u16,
-                    width: sidebar.width,
-                    height: 1,
-                },
-            )
+        .map(|(i, _)| Rect {
+            x: sidebar.x,
+            y: sidebar.y + i as u16,
+            width: sidebar.width,
+            height: 1,
         })
         .collect()
 }
 
-fn draw_monitor_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    let lines: Vec<Line> = MonitorTab::ALL
+/// Typed Monitor sidebar rects (zips index -> `MonitorTab`).
+pub fn monitor_tab_rects(body: Rect) -> Vec<(MonitorTab, Rect)> {
+    let labels = tab_labels(&MonitorTab::ALL, MonitorTab::name);
+    sidebar_tab_rects(body, &labels)
+        .into_iter()
+        .zip(MonitorTab::ALL.iter())
+        .map(|(rect, tab)| (*tab, rect))
+        .collect()
+}
+
+/// Typed Control sidebar rects (zips index -> `ControlTab`).
+pub fn control_tab_rects(body: Rect) -> Vec<(ControlTab, Rect)> {
+    let labels = tab_labels(&ControlTab::ALL, ControlTab::name);
+    sidebar_tab_rects(body, &labels)
+        .into_iter()
+        .zip(ControlTab::ALL.iter())
+        .map(|(rect, tab)| (*tab, rect))
+        .collect()
+}
+
+/// Render the vertical tab list. Borderless so hit-rects line up exactly with
+/// the rendered rows. The active tab is highlighted.
+fn draw_sidebar(frame: &mut Frame, area: Rect, labels: &[&str], active: usize) {
+    let lines: Vec<Line> = labels
         .iter()
-        .map(|tab| {
-            let label = format!(" {} ", tab.name());
-            let style = if *tab == app.monitor_tab {
+        .enumerate()
+        .map(|(i, label)| {
+            let text = format!(" {} ", label);
+            let style = if i == active {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -197,15 +228,13 @@ fn draw_monitor_sidebar(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            Line::from(vec![Span::styled(label, style)])
+            Line::from(vec![Span::styled(text, style)])
         })
         .collect();
-
-    // Borderless sidebar so hit-rects (computed from the same area) line up
-    // exactly with the rendered rows. The content block provides the visual
-    // frame on the right.
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
+
+// ----- Monitor content -----
 
 fn draw_monitor_content(frame: &mut Frame, app: &App, area: Rect) {
     match app.monitor_tab {
@@ -495,16 +524,172 @@ fn render_metric_lines<'a>(
 }
 
 fn draw_control(frame: &mut Frame, app: &App, area: Rect) {
-    let lines = vec![Line::from("CPU Control - TODO"), Line::from("")];
-    let paragraph = Paragraph::new(Text::from(lines))
+    let labels = tab_labels(&ControlTab::ALL, ControlTab::name);
+    let (sidebar, content) = sidebar_layout(area, &labels);
+    let active = ControlTab::ALL
+        .iter()
+        .position(|t| *t == app.control_tab)
+        .unwrap_or(0);
+    draw_sidebar(frame, sidebar, &labels, active);
+    draw_control_content(frame, app, content);
+}
+
+fn draw_control_content(frame: &mut Frame, app: &App, area: Rect) {
+    // Split into the table area and a 1-line message/input strip below.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    match app.control_tab {
+        ControlTab::Online => draw_online_control(frame, app, chunks[0]),
+        ControlTab::FreqLimit => draw_freq_limit_control(frame, app, chunks[0]),
+    }
+    draw_control_message(frame, app, chunks[1]);
+}
+
+/// Online control: per-core `CPU | Status` table; Space/Enter toggles.
+fn draw_online_control(frame: &mut Frame, app: &App, area: Rect) {
+    let online = series_for(&app.snapshot, "cpu.topology.online");
+    let core_count = online.map(|s| s.len()).unwrap_or(0);
+
+    let mut rows: Vec<Row> = Vec::with_capacity(core_count);
+    for i in 0..core_count {
+        let cpu = format!("{}", i);
+        let status = if app.online_lockable.get(i).copied().unwrap_or(false) {
+            match online.and_then(|s| s.get(i)) {
+                Some(Value::Bool(true)) => "online".to_string(),
+                Some(Value::Bool(false)) => "offline".to_string(),
+                _ => "-".to_string(),
+            }
+        } else {
+            "locked".to_string()
+        };
+        rows.push(Row::new(vec![Cell::from(cpu), Cell::from(status)]));
+    }
+    if rows.is_empty() {
+        rows.push(Row::new(vec![Cell::from("-"), Cell::from("-")]));
+    }
+
+    render_control_table(frame, app, area, rows, vec!["CPU Number", "Status"], " Online ");
+}
+
+/// Freq limit control: per-core `CPU | Min Freq | Max Freq` table; the focused
+/// cell is highlighted, typing digits edits it, Enter commits.
+fn draw_freq_limit_control(frame: &mut Frame, app: &App, area: Rect) {
+    let min = series_for(&app.snapshot, "cpu.freq.min");
+    let max = series_for(&app.snapshot, "cpu.freq.max");
+    let core_count = min
+        .map(|s| s.len())
+        .or_else(|| max.map(|s| s.len()))
+        .unwrap_or(0);
+
+    let focused_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let mut rows: Vec<Row> = Vec::with_capacity(core_count);
+    for i in 0..core_count {
+        let cpu = Cell::from(format!("{}", i));
+        let min_cell = min
+            .and_then(|s| s.get(i))
+            .map(cell_string)
+            .unwrap_or_else(|| "-".to_string());
+        let max_cell = max
+            .and_then(|s| s.get(i))
+            .map(cell_string)
+            .unwrap_or_else(|| "-".to_string());
+
+        // Highlight the focused column on the selected row.
+        let (min_styled, max_styled) = if i == app.selected_core {
+            match app.freq_col {
+                FreqCol::Min => (
+                    Cell::new(min_cell).style(focused_style),
+                    Cell::new(max_cell),
+                ),
+                FreqCol::Max => (
+                    Cell::new(min_cell),
+                    Cell::new(max_cell).style(focused_style),
+                ),
+            }
+        } else {
+            (Cell::new(min_cell), Cell::new(max_cell))
+        };
+        rows.push(Row::new(vec![cpu, min_styled, max_styled]));
+    }
+    if rows.is_empty() {
+        rows.push(Row::new(vec![
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+        ]));
+    }
+
+    render_control_table(
+        frame,
+        app,
+        area,
+        rows,
+        vec!["CPU Number", "Min Freq", "Max Freq"],
+        " Freq Limit ",
+    );
+}
+
+/// Render a control `Table` with fixed column widths (12 each), a bold header,
+/// and `selected_core` driving the highlight + scroll offset.
+fn render_control_table(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    rows: Vec<Row>,
+    header: Vec<&str>,
+    title: &str,
+) {
+    let widths: Vec<Constraint> = (0..header.len()).map(|_| Constraint::Length(12)).collect();
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(header.into_iter().map(Cell::from).collect::<Vec<_>>())
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
         .block(
             Block::default()
-                .title(format!(" {} ", app.current_page.name()))
+                .title(format!(" {} ", title))
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL),
         )
-        .scroll((app.scroll_offset.1, app.scroll_offset.0));
-    frame.render_widget(paragraph, area);
+        .row_highlight_style(Style::default().bg(Color::DarkGray));
+
+    let mut state = TableState::default();
+    state.select(Some(app.selected_core));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+/// Bottom strip: freq-edit input line when editing, otherwise the last
+/// control message (if any).
+fn draw_control_message(frame: &mut Frame, app: &App, area: Rect) {
+    let line = if let Some(buf) = &app.freq_edit {
+        let col = match app.freq_col {
+            FreqCol::Min => "min",
+            FreqCol::Max => "max",
+        };
+        Line::from(vec![
+            Span::styled(
+                format!(" cpu{} {} ", app.selected_core, col),
+                Style::default().bg(Color::DarkGray).fg(Color::White),
+            ),
+            Span::raw(" "),
+            Span::raw(buf.clone()),
+            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+            Span::raw("  [Enter=apply Esc=cancel]"),
+        ])
+    } else {
+        Line::from(vec![Span::styled(
+            app.control_message
+                .clone()
+                .unwrap_or_else(|| " Space toggle | m/edit? see help ".to_string()),
+            Style::default().fg(Color::DarkGray),
+        )])
+    };
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_preset(frame: &mut Frame, app: &App, area: Rect) {
@@ -618,7 +803,8 @@ mod tests {
             width: 80,
             height: 22,
         };
-        let (sidebar, content) = monitor_layout(body);
+        let labels = tab_labels(&MonitorTab::ALL, MonitorTab::name);
+        let (sidebar, content) = sidebar_layout(body, &labels);
         // Sidebar is on the left, content to its right.
         assert!(sidebar.x <= content.x);
         assert!(sidebar.width < body.width);
@@ -640,6 +826,28 @@ mod tests {
             prev_bottom = Some(rect.y + rect.height);
             assert!(rect.y < sidebar.y + sidebar.height);
             assert_eq!(*tab, MonitorTab::ALL[i]);
+        }
+    }
+
+    #[test]
+    fn control_sidebar_tabs_stack_vertically_without_overlap() {
+        use crate::tui::app::ControlTab;
+        let body = Rect {
+            x: 0,
+            y: 1,
+            width: 80,
+            height: 22,
+        };
+        let labels = tab_labels(&ControlTab::ALL, ControlTab::name);
+        let (sidebar, _content) = sidebar_layout(body, &labels);
+        let rects = control_tab_rects(body);
+        assert_eq!(rects.len(), ControlTab::ALL.len());
+        for (i, (tab, rect)) in rects.iter().enumerate() {
+            assert_eq!(rect.x, sidebar.x);
+            assert_eq!(rect.width, sidebar.width);
+            assert_eq!(rect.height, 1);
+            assert_eq!(rect.y, sidebar.y + i as u16);
+            assert_eq!(*tab, ControlTab::ALL[i]);
         }
     }
 
